@@ -4,7 +4,7 @@ import { api, apiMovieToMovie } from "./lib/api";
 import type { MetricsResponse } from "./lib/api";
 import { defaultDiscovery, defaultProfile, explainRecommendation, rankMovies, rerankMoviesForDiversity, type DiscoverySettings, type Feedback, type RankedMovie, type RecommendationContext, type TasteProfile } from "./lib/recommender";
 
-type Page = "Discover" | "For You" | "Beyond Your Taste" | "Mood & Context" | "My Collection" | "ML Insights";
+type Page = "Discover" | "For You" | "Beyond Your Taste" | "Mood & Context" | "My Collection" | "ML Insights" | "Catalogue";
 type FiltersState = { genre: string; language: string; year: string; runtime: string };
 
 const movies = demoCatalogue.getAll();
@@ -39,7 +39,7 @@ function applyMovieFilters(items: Movie[], filters: FiltersState) {
 const nav: { name: Page; icon: string }[] = [
   { name: "Discover", icon: "compass" }, { name: "For You", icon: "spark" },
   { name: "Beyond Your Taste", icon: "orbit" }, { name: "Mood & Context", icon: "mood" },
-  { name: "My Collection", icon: "bookmark" }, { name: "ML Insights", icon: "chart" },
+  { name: "My Collection", icon: "bookmark" }, { name: "Catalogue", icon: "search" }, { name: "ML Insights", icon: "chart" },
 ];
 
 function Icon({ name, size = 18 }: { name: string; size?: number }) {
@@ -66,8 +66,8 @@ function Icon({ name, size = 18 }: { name: string; size?: number }) {
   return <svg aria-hidden="true" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">{paths[name]}</svg>;
 }
 
-function Button({ children, variant = "primary", icon, onClick, ariaLabel, className = "", disabled = false }: { children?: React.ReactNode; variant?: "primary" | "secondary" | "ghost" | "icon"; icon?: string; onClick?: () => void; ariaLabel?: string; className?: string; disabled?: boolean }) {
-  return <button className={`btn btn-${variant} ${className}`} onClick={onClick} aria-label={ariaLabel} disabled={disabled}>{icon && <Icon name={icon} />}{children}</button>;
+function Button({ children, variant = "primary", icon, onClick, ariaLabel, className = "", disabled = false, type = "button" }: { children?: React.ReactNode; variant?: "primary" | "secondary" | "ghost" | "icon"; icon?: string; onClick?: () => void; ariaLabel?: string; className?: string; disabled?: boolean; type?: "button" | "submit" | "reset" }) {
+  return <button type={type} className={`btn btn-${variant} ${className}`} onClick={onClick} aria-label={ariaLabel} disabled={disabled}>{icon && <Icon name={icon} />}{children}</button>;
 }
 
 function PageHeader({ eyebrow, title, copy, action }: { eyebrow: string; title: string; copy: string; action?: React.ReactNode }) {
@@ -440,6 +440,47 @@ function EmptyState({ icon, title, copy, button, onAction }: { icon: string; tit
   return <div className="empty-state"><Icon name={icon} size={28} /><h2>{title}</h2><p>{copy}</p><Button variant="secondary" onClick={onAction}>{button}</Button></div>;
 }
 
+function CataloguePage() {
+  const [query, setQuery] = useState("");
+  const [page, setPage] = useState(1);
+  const [data, setData] = useState<any>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const search = () => {
+    setLoading(true); setError(null);
+    const promise = query.trim() ? api.catalogueSearch({ q: query.trim(), page }) : api.cataloguePopular({ page });
+    promise.then((d) => setData(d)).catch((e) => setError(e instanceof Error ? e.message : "Failed")).finally(() => setLoading(false));
+  };
+  useEffect(() => { search(); }, [page]);
+  return <>
+    <PageHeader eyebrow="REAL CATALOGUE" title="Movie catalogue" copy="Search and browse movies from the connected backend (TMDB). Results depend on backend credentials." />
+    <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+      <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search movies" style={{ flex: 1, padding: 8 }} onKeyDown={(e) => { if (e.key === "Enter") { setPage(1); search(); } }} />
+      <Button onClick={() => { setPage(1); search(); }}>Search</Button>
+    </div>
+    {loading && <div className="loading-grid" aria-label="Loading"><i /><i /><i /></div>}
+    {error && <EmptyState icon="info" title="Catalogue unavailable" copy={error} button="Retry" onAction={search} />}
+    {!loading && !error && data && (data.results?.length ? (
+      <>
+        <div className="movie-grid">{data.results.map((m: any) => (
+          <article key={m.external_id} className="movie-card">
+            {m.poster_url ? <img src={m.poster_url} alt={m.title} style={{ width: "100%" }} /> : <div style={{ height: 200, background: "#222" }} />}
+            <h3>{m.title}</h3>
+            <p>{m.original_language} · {m.release_date}</p>
+            <small>{(m.genres || []).join(", ")}</small>
+          </article>
+        ))}</div>
+        <div style={{ marginTop: 16, display: "flex", gap: 8, justifyContent: "center" }}>
+          <Button variant="secondary" disabled={page <= 1} onClick={() => setPage((p) => Math.max(1, p - 1))}>Prev</Button>
+          <span>Page {data.page} / {data.total_pages}</span>
+          <Button variant="secondary" disabled={page >= data.total_pages} onClick={() => setPage((p) => p + 1)}>Next</Button>
+        </div>
+        <p style={{ marginTop: 12, fontSize: 12, opacity: 0.7 }}>Data provided by TMDB. This product uses the TMDB API but is not endorsed or certified by TMDB.</p>
+      </>
+    ) : <EmptyState icon="search" title="No movies found" copy="Try a different search or check backend credentials." button="Retry" onAction={search} />)}
+  </>;
+}
+
 function SearchOverlay({ close, openMovie }: { close: () => void; openMovie: (movie: Movie) => void }) {
   const [query, setQuery] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
@@ -523,6 +564,11 @@ export default function App() {
   const [mobileMenu, setMobileMenu] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [toast, setToast] = useState("");
+  const [authToken, setAuthToken] = useState<string>(() => sessionStorage.getItem("cinemind-token") || "");
+  const [authUser, setAuthUser] = useState<any>(() => { try { return JSON.parse(sessionStorage.getItem("cinemind-user") || "null"); } catch { return null; } });
+  const [authMode, setAuthMode] = useState<"login" | "register" | null>(null);
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [authLoading, setAuthLoading] = useState(false);
   const safeSavedIds = Array.isArray(savedIds) ? savedIds.filter(Number.isFinite) : [];
   const safeFavouriteIds = Array.isArray(favouriteIds) ? favouriteIds.filter(Number.isFinite) : [];
   const safeRatings = ratings && typeof ratings === "object" && !Array.isArray(ratings) ? ratings : {};
@@ -581,6 +627,32 @@ export default function App() {
     notify(removing ? "Movie feedback cleared." : `Local preference updated: ${value === "more" ? "more" : "less"} like this.`);
   };
   const navigate = (p: Page) => { setPage(p); setMobileMenu(false); window.scrollTo({ top: 0, behavior: "smooth" }); };
+  const handleLogin = async (email: string, password: string) => {
+    setAuthLoading(true); setAuthError(null);
+    try {
+      const res = await api.login(email, password);
+      setAuthToken(res.access_token); setAuthUser(res.user);
+      sessionStorage.setItem("cinemind-token", res.access_token);
+      sessionStorage.setItem("cinemind-user", JSON.stringify(res.user));
+      setAuthMode(null);
+    } catch (e) { setAuthError(e instanceof Error ? e.message : "Login failed"); }
+    finally { setAuthLoading(false); }
+  };
+  const handleRegister = async (name: string, email: string, password: string) => {
+    setAuthLoading(true); setAuthError(null);
+    try {
+      const res = await api.register(name, email, password);
+      setAuthToken(res.access_token); setAuthUser(res.user);
+      sessionStorage.setItem("cinemind-token", res.access_token);
+      sessionStorage.setItem("cinemind-user", JSON.stringify(res.user));
+      setAuthMode(null);
+    } catch (e) { setAuthError(e instanceof Error ? e.message : "Registration failed"); }
+    finally { setAuthLoading(false); }
+  };
+  const handleLogout = () => {
+    setAuthToken(""); setAuthUser(null);
+    sessionStorage.removeItem("cinemind-token"); sessionStorage.removeItem("cinemind-user");
+  };
   const props: PageProps = { open: setSelected, saved, save, favourites, favourite, ratings: safeRatings, rate, feedback: safeFeedback, setMovieFeedback, profile: safeProfile, setProfile, discovery: safeDiscovery, setDiscovery, notify, navigate, openSearch: () => setSearchOpen(true) };
   const content = (() => {
     if (page === "Discover") return <Discover {...props} />;
@@ -588,6 +660,7 @@ export default function App() {
     if (page === "Beyond Your Taste") return <Beyond {...props} />;
     if (page === "Mood & Context") return <Mood {...props} />;
     if (page === "My Collection") return <Collection {...props} />;
+    if (page === "Catalogue") return <CataloguePage />;
     return <Insights />;
   })();
   const profileProgress = Math.min(100, 20 + safeProfile.genres.length * 8 + safeProfile.favouriteMovies.length * 5 + Object.keys(safeRatings).length * 3);
@@ -605,6 +678,7 @@ export default function App() {
       <button className="brand" onClick={() => navigate("Discover")}><span className="brand-mark">C</span><span><strong>CineMind</strong><small>KNOW YOUR TASTE</small></span></button>
       <nav>{nav.map((item) => <button key={item.name} className={page === item.name ? "active" : ""} onClick={() => navigate(item.name)}><Icon name={item.icon} /><span>{item.name}</span>{item.name === "Beyond Your Taste" && <i>NEW</i>}</button>)}</nav>
       <div className="sidebar-bottom">
+        {authUser ? <button className="profile" onClick={handleLogout}><span>U</span><span><strong>{authUser.name}</strong><small>Logout</small></span><Icon name="arrow" /></button> : <><button className="profile" onClick={() => setAuthMode("login")}><span>?</span><span><strong>Sign in</strong><small>Access your account</small></span><Icon name="arrow" /></button><button className="profile" onClick={() => setAuthMode("register")}><span>+</span><span><strong>Create account</strong><small>Join CineMind</small></span><Icon name="arrow" /></button></>}
         <button className="taste-progress" onClick={() => setOnboarding(true)}><span className="progress-ring">{profileProgress}</span><span><strong>Taste profile</strong><small>Refine local recommendations</small></span><Icon name="arrow" /></button>
         <button className="theme-toggle" onClick={() => setTheme(safeTheme === "dark" ? "light" : "dark")}><Icon name={safeTheme === "dark" ? "moon" : "sun"} /><span>{safeTheme === "dark" ? "Dark" : "Light"} theme</span><i><b /></i></button>
         <button className="profile" onClick={() => setOnboarding(true)}><span>AM</span><span><strong>Alex Morgan</strong><small>Refine taste profile</small></span><Icon name="arrow" /></button>
@@ -616,6 +690,30 @@ export default function App() {
     {searchOpen && <SearchOverlay close={() => setSearchOpen(false)} openMovie={setSelected} />}
     {selected && <DetailModal movie={selected} close={() => setSelected(null)} props={props} />}
     {onboarding && <Onboarding close={() => setOnboarding(false)} complete={completeOnboarding} />}
+    {authMode && (
+      <div className="modal-overlay" onClick={() => setAuthMode(null)}>
+        <div className="modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 420 }}>
+          <h2>{authMode === "login" ? "Sign in" : "Create account"}</h2>
+          <form onSubmit={(e) => {
+            e.preventDefault();
+            const fd = new FormData(e.currentTarget);
+            const email = String(fd.get("email") || "");
+            const password = String(fd.get("password") || "");
+            if (authMode === "login") handleLogin(email, password);
+            else handleRegister(String(fd.get("name") || ""), email, password);
+          }}>
+            {authMode === "register" && <input name="name" placeholder="Name" required style={{ width: "100%", marginBottom: 8, padding: 8 }} />}
+            <input name="email" type="email" placeholder="Email" required style={{ width: "100%", marginBottom: 8, padding: 8 }} />
+            <input name="password" type="password" placeholder="Password" required style={{ width: "100%", marginBottom: 8, padding: 8 }} />
+            {authError && <p style={{ color: "red" }}>{authError}</p>}
+            <Button type="submit" disabled={authLoading}>{authLoading ? "..." : authMode === "login" ? "Sign in" : "Create account"}</Button>
+          </form>
+          <button onClick={() => setAuthMode(authMode === "login" ? "register" : "login")} style={{ marginTop: 8, background: "none", border: "none", color: "inherit", cursor: "pointer" }}>
+            {authMode === "login" ? "Need an account? Register" : "Already have an account? Sign in"}
+          </button>
+        </div>
+      </div>
+    )}
     {toast && <div className="toast" role="status"><Icon name="check" />{toast}<small>Stored on this device only</small></div>}
   </div>;
 }

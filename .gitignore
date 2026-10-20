@@ -23,6 +23,8 @@ logs/
 # Python backend
 backend/.venv/
 backend/venv/
+backend/data/cinemind.db
+*.db
 .venv/
 venv/
 __pycache__/

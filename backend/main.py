@@ -1,4 +1,5 @@
 import json
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -6,8 +7,16 @@ from typing import Any
 import joblib
 import numpy as np
 import pandas as pd
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query
+from pydantic import BaseModel, Field
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from sqlalchemy.orm import Session
+
+import auth
+import database
+import tmdb
+from database import User, UserPreference, Favourite, WatchlistItem, UserRating, get_db, init_db
 
 BACKEND_DIR = Path(__file__).resolve().parent
 MODELS_DIR = BACKEND_DIR / "models"
@@ -25,6 +34,58 @@ state: dict[str, Any] = {
     "rated_items": {},
     "error": None,
 }
+
+
+class RegisterRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    email: str = Field(min_length=3, max_length=255)
+    password: str = Field(min_length=6, max_length=128)
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+class PreferenceRequest(BaseModel):
+    languages: list[str] = []
+    genres: list[str] = []
+    moods: list[str] = []
+    release_period: str = ""
+    duration: str = ""
+    onboarding_completed: bool = False
+
+
+class CatalogueItemRequest(BaseModel):
+    source: str = "tmdb"
+    external_id: str
+    title: str
+    poster_url: str | None = None
+    genres: list[str] = []
+
+
+class RatingRequest(BaseModel):
+    source: str = "tmdb"
+    external_id: str
+    rating: float = Field(ge=0.5, le=5.0)
+
+
+bearer_scheme = HTTPBearer(auto_error=False)
+
+
+def get_current_user(
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+    db: Session = Depends(get_db),
+) -> User:
+    if credentials is None or not credentials.credentials:
+        raise HTTPException(status_code=401, detail="Not authenticated.")
+    user_id = auth.decode_token(credentials.credentials)
+    if user_id is None:
+        raise HTTPException(status_code=401, detail="Invalid or expired token.")
+    user = db.get(User, int(user_id))
+    if user is None:
+        raise HTTPException(status_code=401, detail="User not found.")
+    return user
 
 
 def load_ratings_data() -> tuple[dict[int, pd.DataFrame], dict[int, set[int]]]:
@@ -276,6 +337,7 @@ def popular_movies(top_k: int = 10) -> tuple[list[int], list[float]]:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    init_db()
     load_artifacts()
     state["ratings_by_user"], state["rated_items"] = load_ratings_data()
     yield
@@ -411,3 +473,319 @@ def recommendations_diverse(
         "diversity": diversity,
         "recommendations": items,
     }
+
+# --- Authentication ---
+
+
+@app.post("/auth/register")
+def register(payload: RegisterRequest, db: Session = Depends(get_db)):
+    email = payload.email.strip().lower()
+    existing = db.query(User).filter(User.email == email).first()
+    if existing:
+        raise HTTPException(status_code=409, detail="Email already registered.")
+    user = User(name=payload.name.strip(), email=email, password_hash=auth.hash_password(payload.password))
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    prefs = UserPreference(user_id=user.id)
+    db.add(prefs)
+    db.commit()
+    token = auth.create_access_token(str(user.id))
+    return {"access_token": token, "token_type": "bearer", "user": {"id": user.id, "name": user.name, "email": user.email}}
+
+
+@app.post("/auth/login")
+def login(payload: LoginRequest, db: Session = Depends(get_db)):
+    email = payload.email.strip().lower()
+    user = db.query(User).filter(User.email == email).first()
+    if user is None or not auth.verify_password(payload.password, user.password_hash):
+        raise HTTPException(status_code=401, detail="Invalid credentials.")
+    token = auth.create_access_token(str(user.id))
+    return {"access_token": token, "token_type": "bearer", "user": {"id": user.id, "name": user.name, "email": user.email}}
+
+
+@app.post("/auth/logout")
+def logout():
+    return {"ok": True}
+
+
+@app.get("/auth/me")
+def me(current_user: User = Depends(get_current_user)):
+    return {"id": current_user.id, "name": current_user.name, "email": current_user.email, "created_at": current_user.created_at.isoformat()}
+
+
+# --- Preferences ---
+
+
+@app.get("/preferences")
+def get_preferences(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    prefs = current_user.preferences
+    if prefs is None:
+        prefs = UserPreference(user_id=current_user.id)
+        db.add(prefs)
+        db.commit()
+        db.refresh(prefs)
+    return prefs.as_dict()
+
+
+@app.put("/preferences")
+def update_preferences(payload: PreferenceRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    prefs = current_user.preferences
+    if prefs is None:
+        prefs = UserPreference(user_id=current_user.id)
+        db.add(prefs)
+    prefs.languages = json.dumps(payload.languages)
+    prefs.genres = json.dumps(payload.genres)
+    prefs.moods = json.dumps(payload.moods)
+    prefs.release_period = payload.release_period
+    prefs.duration = payload.duration
+    prefs.onboarding_completed = 1 if payload.onboarding_completed else prefs.onboarding_completed
+    db.commit()
+    db.refresh(prefs)
+    return prefs.as_dict()
+
+
+# --- Favourites ---
+
+
+@app.get("/me/favourites")
+def list_favourites(current_user: User = Depends(get_current_user)):
+    return [{"id": f.id, "source": f.source, "external_id": f.external_id, "title": f.title, "poster_url": f.poster_url, "genres": json.loads(f.genres or "[]"), "created_at": f.created_at.isoformat()} for f in current_user.favourites]
+
+
+@app.post("/me/favourites")
+def add_favourite(payload: CatalogueItemRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    existing = db.query(Favourite).filter(Favourite.user_id == current_user.id, Favourite.source == payload.source, Favourite.external_id == payload.external_id).first()
+    if existing:
+        return {"ok": True, "id": existing.id}
+    fav = Favourite(user_id=current_user.id, source=payload.source, external_id=payload.external_id, title=payload.title, poster_url=payload.poster_url, genres=json.dumps(payload.genres))
+    db.add(fav)
+    db.commit()
+    db.refresh(fav)
+    return {"ok": True, "id": fav.id}
+
+
+@app.delete("/me/favourites/{source}/{external_id}")
+def remove_favourite(source: str, external_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    fav = db.query(Favourite).filter(Favourite.user_id == current_user.id, Favourite.source == source, Favourite.external_id == external_id).first()
+    if fav:
+        db.delete(fav)
+        db.commit()
+    return {"ok": True}
+
+
+# --- Watchlist ---
+
+
+@app.get("/me/watchlist")
+def list_watchlist(current_user: User = Depends(get_current_user)):
+    return [{"id": w.id, "source": w.source, "external_id": w.external_id, "title": w.title, "poster_url": w.poster_url, "genres": json.loads(w.genres or "[]"), "created_at": w.created_at.isoformat()} for w in current_user.watchlist]
+
+
+@app.post("/me/watchlist")
+def add_watchlist(payload: CatalogueItemRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    existing = db.query(WatchlistItem).filter(WatchlistItem.user_id == current_user.id, WatchlistItem.source == payload.source, WatchlistItem.external_id == payload.external_id).first()
+    if existing:
+        return {"ok": True, "id": existing.id}
+    item = WatchlistItem(user_id=current_user.id, source=payload.source, external_id=payload.external_id, title=payload.title, poster_url=payload.poster_url, genres=json.dumps(payload.genres))
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return {"ok": True, "id": item.id}
+
+
+@app.delete("/me/watchlist/{source}/{external_id}")
+def remove_watchlist(source: str, external_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    item = db.query(WatchlistItem).filter(WatchlistItem.user_id == current_user.id, WatchlistItem.source == source, WatchlistItem.external_id == external_id).first()
+    if item:
+        db.delete(item)
+        db.commit()
+    return {"ok": True}
+
+
+# --- User ratings on catalogue movies ---
+
+
+@app.post("/me/ratings")
+def add_user_rating_catalogue(payload: RatingRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    existing = db.query(UserRating).filter(UserRating.user_id == current_user.id, UserRating.source == payload.source, UserRating.external_id == payload.external_id).first()
+    if existing:
+        existing.rating = payload.rating
+    else:
+        db.add(UserRating(user_id=current_user.id, source=payload.source, external_id=payload.external_id, rating=payload.rating))
+    db.commit()
+    return {"ok": True}
+
+
+@app.get("/me/ratings")
+def list_user_ratings(current_user: User = Depends(get_current_user)):
+    return [{"source": r.source, "external_id": r.external_id, "rating": r.rating, "created_at": r.created_at.isoformat()} for r in current_user.ratings]
+
+
+# --- TMDB catalogue endpoints ---
+
+
+def _tmdb_guard():
+    if not tmdb.TMDB_API_KEY:
+        raise HTTPException(status_code=503, detail="TMDB_API_KEY is not configured.")
+
+
+@app.get("/catalogue/search")
+def catalogue_search(q: str = Query(..., min_length=1), language: str | None = None, genre: int | None = None, year: int | None = None, page: int = Query(default=1, ge=1)):
+    _tmdb_guard()
+    try:
+        return tmdb.search_movies(q, language=language, genre=genre, year=year, page=page)
+    except tmdb.TmdbError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
+@app.get("/catalogue/popular")
+def catalogue_popular(language: str | None = None, page: int = Query(default=1, ge=1)):
+    _tmdb_guard()
+    try:
+        return tmdb.popular_movies(language=language, page=page)
+    except tmdb.TmdbError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
+@app.get("/catalogue/trending")
+def catalogue_trending(time_window: str = Query(default="week", pattern="^(day|week)$"), page: int = Query(default=1, ge=1)):
+    _tmdb_guard()
+    try:
+        return tmdb.trending_movies(time_window=time_window, page=page)
+    except tmdb.TmdbError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
+@app.get("/catalogue/discover")
+def catalogue_discover(language: str | None = None, genre: int | None = None, year: int | None = None, page: int = Query(default=1, ge=1)):
+    _tmdb_guard()
+    try:
+        return tmdb.discover_movies(language=language, genre=genre, year=year, page=page)
+    except tmdb.TmdbError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
+@app.get("/catalogue/movie/{external_id}")
+def catalogue_movie(external_id: str):
+    _tmdb_guard()
+    try:
+        return tmdb.movie_details(int(external_id))
+    except (ValueError, tmdb.TmdbError) as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
+@app.get("/catalogue/genres")
+def catalogue_genres():
+    return tmdb.GENRE_MAP
+
+
+@app.get("/catalogue/languages")
+def catalogue_languages():
+    return tmdb.SUPPORTED_LANGUAGES
+
+
+# --- Cold-start personalized recommendations ---
+
+
+def _score_tmdb_movie(movie: dict, prefs: dict, fav_genres: set[str], rated_ids: set[str]) -> float:
+    score = 0.0
+    langs = set(prefs.get("languages", []))
+    genres = set(prefs.get("genres", []))
+    moods = set(prefs.get("moods", []))
+    if langs and movie.get("original_language") in langs:
+        score += 2.0
+    movie_genres = set(movie.get("genres") or [])
+    score += len(genres & movie_genres) * 1.5
+    score += len(fav_genres & movie_genres) * 1.0
+    va = movie.get("vote_average")
+    if va is not None:
+        score += float(va) / 2.0
+    pop = movie.get("popularity")
+    if pop is not None:
+        score += min(float(pop), 100.0) / 100.0
+    if movie.get("poster_url"):
+        score += 0.2
+    return score
+
+
+@app.get("/me/recommendations")
+def personalized_recommendations(limit: int = Query(default=10, ge=1, le=50), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    prefs = current_user.preferences
+    pref_dict = prefs.as_dict() if prefs else {"languages": [], "genres": [], "moods": [], "release_period": "", "duration": "", "onboarding_completed": False}
+    fav_genres: set[str] = set()
+    for fav in current_user.favourites:
+        try:
+            fav_genres |= set(json.loads(fav.genres or "[]"))
+        except Exception:
+            pass
+    rated_ids = {r.external_id for r in current_user.ratings}
+
+    candidates: list[dict] = []
+    if tmdb.TMDB_API_KEY:
+        try:
+            for lang in (pref_dict.get("languages") or [None]):
+                data = tmdb.popular_movies(language=lang, page=1) if lang else tmdb.popular_movies(page=1)
+                candidates.extend(data.get("results", []))
+            data = tmdb.trending_movies(page=1)
+            candidates.extend(data.get("results", []))
+        except tmdb.TmdbError:
+            pass
+
+    seen: set[str] = set()
+    unique: list[dict] = []
+    for m in candidates:
+        eid = m.get("external_id")
+        if eid in seen or eid in rated_ids:
+            continue
+        seen.add(eid)
+        unique.append(m)
+
+    scored = sorted(unique, key=lambda m: _score_tmdb_movie(m, pref_dict, fav_genres, rated_ids), reverse=True)
+    pool = scored[: max(limit * 5, 50)]
+
+    def genre_sim(a: dict, b: dict) -> float:
+        ga = set(a.get("genres") or [])
+        gb = set(b.get("genres") or [])
+        union = ga | gb
+        return len(ga & gb) / len(union) if union else 0.0
+
+    selected: list[dict] = []
+    remaining = list(pool)
+    diversity = 0.5
+    while len(selected) < limit and remaining:
+        best_idx = 0
+        best_mmr = None
+        best_sim = 0.0
+        for idx, m in enumerate(remaining):
+            rel = _score_tmdb_movie(m, pref_dict, fav_genres, rated_ids)
+            if not selected:
+                mmr_val = (1.0 - diversity) * rel
+                max_s = 0.0
+            else:
+                sims = [genre_sim(m, s) for s in selected]
+                max_s = max(sims) if sims else 0.0
+                mmr_val = (1.0 - diversity) * rel - diversity * max_s
+            if best_mmr is None or mmr_val > best_mmr:
+                best_idx = idx
+                best_mmr = mmr_val
+                best_sim = max_s
+        m = remaining.pop(best_idx)
+        selected.append(m)
+
+    items = []
+    for m in selected:
+        items.append({
+            "source": "tmdb",
+            "external_id": m.get("external_id"),
+            "movie_id": None,
+            "title": m.get("title"),
+            "genres": "|".join(m.get("genres") or []),
+            "poster_url": m.get("poster_url"),
+            "overview": m.get("overview"),
+            "release_date": m.get("release_date"),
+            "original_language": m.get("original_language"),
+            "vote_average": m.get("vote_average"),
+            "score": _score_tmdb_movie(m, pref_dict, fav_genres, rated_ids),
+        })
+    return {"user_id": current_user.id, "recommendations": items}

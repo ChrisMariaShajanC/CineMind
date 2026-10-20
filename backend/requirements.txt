@@ -5,3 +5,8 @@ numpy
 scikit-learn
 joblib
 httpx
+sqlalchemy
+python-jose
+passlib[bcrypt]
+python-multipart
+python-dotenv
