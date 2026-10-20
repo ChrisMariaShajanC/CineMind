@@ -1,0 +1,10 @@
+{
+  "description": "Discover personalized movie recommendations with CineMind, featuring tailored suggestions, genre exploration, and insights to enhance your cinematic experience.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}

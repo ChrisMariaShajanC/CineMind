@@ -1,0 +1,53 @@
+{
+  "relevance_threshold": 4.0,
+  "top_k": 10,
+  "test_ratio": 0.2,
+  "models": {
+    "popularity": {
+      "rmse": 1.0075732266189887,
+      "precision_at_10": 0.032135761589403976,
+      "recall_at_10": 0.017692760689811494
+    },
+    "collaborative_filtering": {
+      "rmse": 1.0795769184835087,
+      "precision_at_10": 0.09485099337748344,
+      "recall_at_10": 0.06604440304931619
+    },
+    "content_based": {
+      "rmse": 1.0648445460676015,
+      "precision_at_10": 0.012268211920529801,
+      "recall_at_10": 0.009657757865736262
+    },
+    "hybrid": {
+      "rmse": 1.0502637007877835,
+      "precision_at_10": 0.08059602649006622,
+      "recall_at_10": 0.06003115919210161
+    }
+  },
+  "model_list": [
+    {
+      "model": "Popularity",
+      "rmse": 1.0075732266189887,
+      "precision_at_10": 0.032135761589403976,
+      "recall_at_10": 0.017692760689811494
+    },
+    {
+      "model": "Collaborative Filtering",
+      "rmse": 1.0795769184835087,
+      "precision_at_10": 0.09485099337748344,
+      "recall_at_10": 0.06604440304931619
+    },
+    {
+      "model": "Content-Based",
+      "rmse": 1.0648445460676015,
+      "precision_at_10": 0.012268211920529801,
+      "recall_at_10": 0.009657757865736262
+    },
+    {
+      "model": "Hybrid",
+      "rmse": 1.0502637007877835,
+      "precision_at_10": 0.08059602649006622,
+      "recall_at_10": 0.06003115919210161
+    }
+  ]
+}
